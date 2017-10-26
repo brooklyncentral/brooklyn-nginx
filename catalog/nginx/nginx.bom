@@ -43,6 +43,18 @@ brooklyn.catalog:
           The sensor used to determine if the machine should be in the server pool
         type: string
         default: service.isUp
+      - name: nginx.port
+        label: "The nginx port"
+        description: |
+          The port used by http
+        type: integer
+        default: 80
+      - name: worker.connections
+        label: "Maximum worker connections"
+        description: |
+          The maximum number of worker connections
+        type: integer
+        default: 8196
       brooklyn.policies:
       - type: org.apache.brooklyn.policy.InvokeEffectorOnCollectionSensorChange
         brooklyn.config:
@@ -68,6 +80,9 @@ brooklyn.catalog:
             HOST_SUBNET_HOSTNAME: $brooklyn:attributeWhenReady("host.subnet.hostname")
             HOST_ADDRESS_LIST: $brooklyn:attributeWhenReady("targets")
             MONITOR_LIST: $brooklyn:attributeWhenReady("monitorSensors")
+            HTTP_PORT: $brooklyn:config("nginx.port")
+            WORKER_CONNECTIONS: $brooklyn:config("worker.connections")
+            ENTITY_ID: $brooklyn:attributeWhenReady("entity.id")
             ENTITY_ID: $brooklyn:attributeWhenReady("entity.id")
           description: |
             Updates the members based on the sensor.inpool value
@@ -81,7 +96,7 @@ brooklyn.catalog:
             flock -n 200
             sudo tee /etc/nginx/nginx.conf <<-EOF
             events {
-              worker_connections 8196;
+              worker_connections ${WORKER_CONNECTIONS};
             }
             http {
               upstream ${ENTITY_ID} {
@@ -110,7 +125,7 @@ brooklyn.catalog:
                proxy_set_header Host \$http_host;
                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
                proxy_set_header X-Real-IP \$remote_addr;
-               listen 80; 
+               listen ${HTTP_PORT}; 
             
                location / {
                   proxy_pass http://${ENTITY_ID};
@@ -161,7 +176,8 @@ brooklyn.catalog:
             enricher.targetSensor: $brooklyn:sensor("targets")
             enricher.joiner.quote: false
       brooklyn.config:
-        nginx.port: 80
+        shell.env:
+          HTTP_PORT: $brooklyn:config("nginx.port")
         nginx.https.port: 445
         install.command: |
           sudo tee -a /etc/sysctl.conf <<-EOF
@@ -172,6 +188,8 @@ brooklyn.catalog:
           sudo yum -y install nginx
           sudo systemctl enable nginx
           sudo setsebool -P httpd_can_network_connect 1
+          sudo semanage port -a -t http_port_t  -p tcp ${HTTP_PORT} || true
+          sudo semanage port -m -t http_port_t  -p tcp ${HTTP_PORT} || true
         launch.command: |
           sudo service nginx start
         stop.command: |

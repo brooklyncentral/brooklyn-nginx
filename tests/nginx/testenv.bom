@@ -57,6 +57,7 @@ brooklyn.catalog:
         brooklyn.config:
           loadbalancer.serverpool: $brooklyn:entity("cluster")
           nginx.sticky: false
+          nginx.port: 8000
       - type: org.apache.brooklyn.entity.proxy.nginx.NginxController
         name: Load Balancer 2 (nginx) 
         brooklyn.config:
