@@ -1,0 +1,235 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+brooklyn.catalog:
+  version: "1.0.0-SNAPSHOT" # BROOKLYN_NGINX_VERSION
+  publish:
+    description: |
+      Nginx is a web server which can also be used as a reverse proxy, load balancer and HTTP cache.
+    license_code: Apache-2.0
+    defaults:
+      drbdIconUrl: &nginxIconUrl "https://s3.eu-central-1.amazonaws.com/misc-csft/nginx.png"
+  items:
+  - "https://github.com/brooklyncentral/common-catalog-utils/releases/download/v0.1.0/common.bom"
+  - id: nginx-node
+    name: "NGINX Node"
+    description: |
+      An NGINX node
+    itemType: entity
+    iconUrl: *nginxIconUrl
+    item:
+      id: nginx-node
+      name: "NGINX Node"
+      type: centos7-software-process
+      brooklyn.parameters:
+      - name: sensor.inpool
+        label: "The sensor to monitor"
+        description: |
+          The sensor used to determine if the machine should be in the server pool
+        type: string
+        default: service.isUp
+      - name: nginx.port
+        label: "The nginx port"
+        description: |
+          The port used by http
+        type: integer
+        default: 80
+      - name: worker.connections
+        label: "Maximum worker connections"
+        description: |
+          The maximum number of worker connections
+        type: integer
+        default: 8196
+      brooklyn.policies:
+      - type: org.apache.brooklyn.policy.InvokeEffectorOnCollectionSensorChange
+        brooklyn.config:
+          sensor: $brooklyn:sensor("monitorSensors.list")
+          onAdded: updateMembers
+          onRemoved: updateMembers
+      - type: org.apache.brooklyn.policy.InvokeEffectorOnCollectionSensorChange
+        brooklyn.config:
+          sensor: $brooklyn:sensor("target.list")
+          onAdded: updateMembers
+          onRemoved: updateMembers
+      - type: org.apache.brooklyn.policy.InvokeEffectorOnSensorChange
+        brooklyn.config:
+          sensor: $brooklyn:sensor("service.isUp")
+          effector: updateMembers
+          
+      brooklyn.initializers:
+      - type: org.apache.brooklyn.core.effector.ssh.SshCommandEffector
+        brooklyn.config:
+          name: updateMembers
+          shell.env:
+            HOST_SUBNET_ADDRESS: $brooklyn:attributeWhenReady("host.subnet.address")
+            HOST_SUBNET_HOSTNAME: $brooklyn:attributeWhenReady("host.subnet.hostname")
+            HOST_ADDRESS_LIST: $brooklyn:attributeWhenReady("targets")
+            MONITOR_LIST: $brooklyn:attributeWhenReady("monitorSensors")
+            HTTP_PORT: $brooklyn:config("nginx.port")
+            WORKER_CONNECTIONS: $brooklyn:config("worker.connections")
+            ENTITY_ID: $brooklyn:attributeWhenReady("entity.id")
+          description: |
+            Updates the members based on the sensor.inpool value
+          command: |
+            # exit if nginx isn't installed
+            if [ ! -d "/etc/nginx/conf.d" ]; then
+              echo exit
+            fi
+            # if there's just a comma, remove it
+            if [ "${HOST_ADDRESS_LIST//,}" == "" ]; then
+               echo "HOST_ADDRESS_LIST is empty"
+               exit 0;
+            fi
+            (
+            # Wait for lock on /var/lock/.myscript.exclusivelock (fd 200) for 10 seconds
+            flock -n 200
+            tee nginx-build.conf <<-EOF
+            events {
+              worker_connections ${WORKER_CONNECTIONS};
+            }
+            http {
+              upstream ${ENTITY_ID} {
+            EOF
+            
+            counter=1
+            serversAvailable=false
+            # loop through address list
+            for i in $(echo ${HOST_ADDRESS_LIST} | sed "s/,/ /g")
+            do
+            MONITOR=`echo ${MONITOR_LIST} | cut -d"," -f${counter}`
+            HOST_AND_PORT=`echo $i | awk -F/ '{print $3}'`
+            
+            # regard a false, null or empty string as not available
+            if [ "${MONITOR}" != "false" ] && [ "${MONITOR}" != "FALSE" ] && [ "${MONITOR}" != "null" ] && [ "${MONITOR}" != "" ]; then 
+            tee -a nginx-build.conf <<-EOF
+                server $HOST_AND_PORT;
+            EOF
+            serversAvailable=true
+            fi
+            counter=$((counter + 1))
+            done
+            
+            # if there's no available servers to forward to, just exit. In future put holding page?
+            if [ "${serversAvailable}" == "false" ]; then
+              exit 0;
+            fi
+            
+            tee -a nginx-build.conf <<-EOF
+            }
+
+            server {
+               server_tokens off;
+               proxy_set_header Host \$http_host;
+               proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+               proxy_set_header X-Real-IP \$remote_addr;
+               listen ${HTTP_PORT}; 
+            
+               location / {
+                  proxy_pass http://${ENTITY_ID};
+               }
+            }
+            }
+            EOF
+            # copy the built config into the installed location
+            sudo cp nginx-build.conf /etc/nginx/nginx.conf
+            sudo service nginx restart || true
+            ) 200>/tmp/.nginx.exclusivelock
+                
+      brooklyn.enrichers:
+        - type: org.apache.brooklyn.enricher.stock.Transformer
+          brooklyn.config:
+            enricher.sourceSensor: $brooklyn:sensor("host.address")
+            enricher.targetSensor: $brooklyn:sensor("main.uri")
+            enricher.targetValue: $brooklyn:formatString("http://%s:%s", $brooklyn:attributeWhenReady("host.address"), $brooklyn:config("nginx.port"))
+        - type: org.apache.brooklyn.enricher.stock.Transformer
+          brooklyn.config:
+            enricher.sourceSensor: $brooklyn:sensor("host.subnet.address")
+            enricher.targetSensor: $brooklyn:sensor("main.uri.mapped.subnet")
+            enricher.targetValue: $brooklyn:formatString("http://%s:%s", $brooklyn:attributeWhenReady("host.subnet.address"), $brooklyn:config("nginx.port"))
+        - type: org.apache.brooklyn.enricher.stock.Transformer
+          brooklyn.config:
+            enricher.sourceSensor: $brooklyn:sensor("host.name")
+            enricher.targetSensor: $brooklyn:sensor("main.uri.mapped.public")
+            enricher.targetValue: $brooklyn:formatString("http://%s:%s", $brooklyn:attributeWhenReady("host.name"), $brooklyn:config("nginx.port"))
+      
+        - type: org.apache.brooklyn.enricher.stock.Aggregator
+          brooklyn.config:
+            uniqueTag: nginx-misc-aggregator
+            enricher.producer: $brooklyn:config("loadbalancer.serverpool")
+            # if the loadbalancer.serverpool is a string
+            #$brooklyn:component($brooklyn:config("loadbalancer.serverpool"))
+            enricher.sourceSensor: $brooklyn:sensor($brooklyn:config("sensor.inpool"))
+            enricher.targetSensor: $brooklyn:sensor("monitorSensors.list")
+            enricher.aggregating.fromMembers: true
+            enricher.aggregator.excludeBlank: false
+        - type: org.apache.brooklyn.enricher.stock.Joiner
+          brooklyn.config:
+            uniqueTag: nginx-misc-joiner
+            enricher.sourceSensor: $brooklyn:sensor("monitorSensors.list")
+            enricher.targetSensor: $brooklyn:sensor("monitorSensors")
+            enricher.joiner.quote: false
+        - type: org.apache.brooklyn.enricher.stock.Aggregator
+          brooklyn.config:
+            uniqueTag: nginx-hostaddress-aggregator
+            enricher.producer: $brooklyn:config("loadbalancer.serverpool")
+            # if the loadbalancer.serverpool is a string
+            #$brooklyn:component($brooklyn:config("loadbalancer.serverpool"))
+            enricher.sourceSensor: $brooklyn:sensor("main.uri")
+            enricher.targetSensor: $brooklyn:sensor("target.list")
+            enricher.aggregating.fromMembers: true
+            enricher.aggregator.excludeBlank: false
+        - type: org.apache.brooklyn.enricher.stock.Joiner
+          brooklyn.config:
+            uniqueTag: nginx-hostaddress-joiner
+            enricher.sourceSensor: $brooklyn:sensor("target.list")
+            enricher.targetSensor: $brooklyn:sensor("targets")
+            enricher.joiner.quote: false
+
+      brooklyn.config:
+        shell.env:
+          HTTP_PORT: $brooklyn:config("nginx.port")
+        nginx.https.port: 445
+        install.command: |
+          sudo tee -a /etc/sysctl.conf <<-EOF
+          net.ipv4.ip_nonlocal_bind=1
+          EOF
+          sudo sysctl -p
+          sudo yum -y install epel-release
+          sudo yum -y install nginx
+          sudo systemctl enable nginx
+          sudo setsebool -P httpd_can_network_connect 1
+          sudo semanage port -a -t http_port_t  -p tcp ${HTTP_PORT} || true
+          sudo semanage port -m -t http_port_t  -p tcp ${HTTP_PORT} || true
+        launch.command: |
+          sudo service nginx start
+        stop.command: |
+          sudo service nginx stop
+        checkRunning.command: |
+          sudo service nginx status
+          
+  - id: nginx-template
+    version: "1.0.0-SNAPSHOT" # BROOKLYN_NGINX_VERSION
+    name: NGINX
+    itemType: template
+    iconUrl: *nginxIconUrl
+    license: Apache-2.0
+    item:
+      booklyn.config:
+        defaultDisplayName: NGINX
+      services:
+      - type: nginx-node
