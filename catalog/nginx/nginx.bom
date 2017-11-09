@@ -63,7 +63,7 @@ brooklyn.catalog:
           onRemoved: updateMembers
       - type: org.apache.brooklyn.policy.InvokeEffectorOnCollectionSensorChange
         brooklyn.config:
-          sensor: $brooklyn:sensor("host.address.list")
+          sensor: $brooklyn:sensor("target.list")
           onAdded: updateMembers
           onRemoved: updateMembers
       - type: org.apache.brooklyn.policy.InvokeEffectorOnSensorChange
@@ -83,7 +83,6 @@ brooklyn.catalog:
             HTTP_PORT: $brooklyn:config("nginx.port")
             WORKER_CONNECTIONS: $brooklyn:config("worker.connections")
             ENTITY_ID: $brooklyn:attributeWhenReady("entity.id")
-            ENTITY_ID: $brooklyn:attributeWhenReady("entity.id")
           description: |
             Updates the members based on the sensor.inpool value
           command: |
@@ -91,10 +90,15 @@ brooklyn.catalog:
             if [ ! -d "/etc/nginx/conf.d" ]; then
               echo exit
             fi
+            # if there's just a comma, remove it
+            if [ "${HOST_ADDRESS_LIST//,}" == "" ]; then
+               echo "HOST_ADDRESS_LIST is empty"
+               exit 0;
+            fi
             (
             # Wait for lock on /var/lock/.myscript.exclusivelock (fd 200) for 10 seconds
             flock -n 200
-            sudo tee /etc/nginx/nginx.conf <<-EOF
+            tee nginx-build.conf <<-EOF
             events {
               worker_connections ${WORKER_CONNECTIONS};
             }
@@ -103,6 +107,8 @@ brooklyn.catalog:
             EOF
             
             counter=1
+            serversAvailable=false
+            # loop through address list
             for i in $(echo ${HOST_ADDRESS_LIST} | sed "s/,/ /g")
             do
             MONITOR=`echo ${MONITOR_LIST} | cut -d"," -f${counter}`
@@ -110,14 +116,20 @@ brooklyn.catalog:
             
             # regard a false, null or empty string as not available
             if [ "${MONITOR}" != "false" ] && [ "${MONITOR}" != "FALSE" ] && [ "${MONITOR}" != "null" ] && [ "${MONITOR}" != "" ]; then 
-            sudo tee -a /etc/nginx/nginx.conf <<-EOF
+            tee -a nginx-build.conf <<-EOF
                 server $HOST_AND_PORT;
             EOF
+            serversAvailable=true
             fi
             counter=$((counter + 1))
             done
             
-            sudo tee -a /etc/nginx/nginx.conf <<-EOF
+            # if there's no available servers to forward to, just exit. In future put holding page?
+            if [ "${serversAvailable}" == "false" ]; then
+              exit 0;
+            fi
+            
+            tee -a nginx-build.conf <<-EOF
             }
 
             server {
@@ -133,6 +145,8 @@ brooklyn.catalog:
             }
             }
             EOF
+            # copy the built config into the installed location
+            sudo cp nginx-build.conf /etc/nginx/nginx.conf
             sudo service nginx restart || true
             ) 200>/tmp/.nginx.exclusivelock
                 
@@ -142,6 +156,16 @@ brooklyn.catalog:
             enricher.sourceSensor: $brooklyn:sensor("host.address")
             enricher.targetSensor: $brooklyn:sensor("main.uri")
             enricher.targetValue: $brooklyn:formatString("http://%s:%s", $brooklyn:attributeWhenReady("host.address"), $brooklyn:config("nginx.port"))
+        - type: org.apache.brooklyn.enricher.stock.Transformer
+          brooklyn.config:
+            enricher.sourceSensor: $brooklyn:sensor("host.subnet.address")
+            enricher.targetSensor: $brooklyn:sensor("main.uri.mapped.subnet")
+            enricher.targetValue: $brooklyn:formatString("http://%s:%s", $brooklyn:attributeWhenReady("host.subnet.address"), $brooklyn:config("nginx.port"))
+        - type: org.apache.brooklyn.enricher.stock.Transformer
+          brooklyn.config:
+            enricher.sourceSensor: $brooklyn:sensor("host.name")
+            enricher.targetSensor: $brooklyn:sensor("main.uri.mapped.public")
+            enricher.targetValue: $brooklyn:formatString("http://%s:%s", $brooklyn:attributeWhenReady("host.name"), $brooklyn:config("nginx.port"))
       
         - type: org.apache.brooklyn.enricher.stock.Aggregator
           brooklyn.config:
@@ -175,6 +199,7 @@ brooklyn.catalog:
             enricher.sourceSensor: $brooklyn:sensor("target.list")
             enricher.targetSensor: $brooklyn:sensor("targets")
             enricher.joiner.quote: false
+
       brooklyn.config:
         shell.env:
           HTTP_PORT: $brooklyn:config("nginx.port")
