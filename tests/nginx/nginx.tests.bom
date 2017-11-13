@@ -27,7 +27,9 @@ brooklyn.catalog:
       services:
       - type: YAMLNginx-ThreeTierApp
         id: target-app
-        
+        brooklyn.config:
+          ssl.certificate: "https://raw.githubusercontent.com/brooklyncentral/brooklyn-three-tier-webapp/master/resources/domain.crt"
+          ssl.key: "https://raw.githubusercontent.com/brooklyncentral/brooklyn-three-tier-webapp/master/resources/domain.key"
       - type: test-case
         brooklyn.config:
           targetId: target-app
@@ -46,13 +48,14 @@ brooklyn.catalog:
           brooklyn.children:
           - type: org.apache.brooklyn.test.framework.TestSshCommand
             name: "Apply load to endpoint"
-            target: $brooklyn:entity("nginx")
+            target: $brooklyn:entity("nginx-https")
             shell.env:
-              TARGET_URI: $brooklyn:entity("nginx").attributeWhenReady("main.uri")
+              TARGET_URI: $brooklyn:formatString("https://%s", $brooklyn:entity("nginx-https").attributeWhenReady("host.address"))
             command: |
               for ((i=1;i<=1000;i++)); 
               do 
-                 curl -k -s ${TARGET_URI} > /dev/null
+                 curl -k -s ${TARGET_URI}?$RANDOM > /dev/null > /dev/null || true
+                 echo $i
               done
           - type: assert-sensor
             name: "Check member count goes up"
