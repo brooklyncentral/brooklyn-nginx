@@ -31,11 +31,15 @@ brooklyn.catalog:
       type: org.apache.brooklyn.entity.stock.BasicApplication
       id: app
       brooklyn.parameters:
-      - name: ssl
-        label: Cluster SSL
-        type: org.apache.brooklyn.entity.proxy.ProxySslConfig
+      - name: ssl.certificate
+        label: SSL Certificate
         description: |
-          SSLProxy configuration that sets the api cluster loadbalancer up with ssl certificates
+          SSL certificates for the api cluster loadbalancer
+      brooklyn.parameters:
+      - name: ssl.key
+        label: SSL Key
+        description: |
+          SSL key for the api cluster loadbalancer
       brooklyn.children:
       - type: org.apache.brooklyn.entity.group.DynamicCluster
         name: Cluster
@@ -75,10 +79,19 @@ brooklyn.catalog:
             maxPoolSize: 3
 
       - type: nginx-node
-        id: nginx
-        name: Load Balancer (nginx)
+        id: nginx-http
+        name: Load Balancer HTTP (nginx)
         brooklyn.config:
           loadbalancer.serverpool: $brooklyn:entity("cluster")
+          
+      - type: nginx-node
+        id: nginx-https
+        name: Load Balancer HTTPS (nginx)
+        brooklyn.config:
+          loadbalancer.serverpool: $brooklyn:entity("cluster")
+          ssl.certificate.url: $brooklyn:config("ssl.certificate")
+          ssl.key.url: $brooklyn:config("ssl.key")
+          
       - type: org.apache.brooklyn.entity.database.mysql.MySqlNode
         id: db
         name: DB (MySQL)
@@ -87,7 +100,7 @@ brooklyn.catalog:
       brooklyn.enrichers:
       - type: org.apache.brooklyn.enricher.stock.Propagator
         brooklyn.config:
-          producer: $brooklyn:entity("nginx")
+          producer: $brooklyn:entity("nginx-https")
           propagating:
           - main.uri
           - main.uri.mapped.subnet
